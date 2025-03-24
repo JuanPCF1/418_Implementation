@@ -14,14 +14,9 @@ def handle_client(client_socket, clients, username, usernames):
             # Separate the client's name from the message
             foo, message_only = message.split(": ", 1)
             log_message(username + ": " + message_only)
-            if message_only == "@grove":
-                client_socket.sendall(("Users in the grove: " + ", ".join(usernames)).encode())
-            else:
-                if message_only == "@leaves":
-                    raise ConnectionResetError
-                for client in clients:
-                    if client != client_socket:
-                        client.sendall(message.encode())
+            for client in clients:
+                if client != client_socket:
+                    client.sendall(message.encode())
     except ConnectionResetError:
         log_message(f"{username} disconnected")
         for client in clients:
