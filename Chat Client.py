@@ -1,7 +1,23 @@
 import socket
 import threading
+import os
+import json
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
+from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+from cryptography.hazmat.backends import default_backend
+from base64 import b64encode, b64decode
+
+# Parameters for the diffie-hellman key exchange
+# parameters = dh.generate_parameters(generator=2, key_size=512, backend=default_backend())
+
+
+#def encrypt_message(message, key):
+#    init_vector = os.urandom(16)
 
 def receive_messages(client_socket,):
     while True:
