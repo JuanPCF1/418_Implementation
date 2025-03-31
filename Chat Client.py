@@ -17,7 +17,7 @@ from base64 import b64encode, b64decode
 class DoubleRatchet:
     def __init__(self):
         # Set up the diffie-hellman parameters using the cryptography library
-        self.parameters = dh.generate_parameters(generator=2, key_size=512, backend=default_backend())
+        self.parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
         
         # Generate a private key and private key pair
         self.private_key = self.parameters.generate_private_key()
@@ -36,21 +36,22 @@ class DoubleRatchet:
     def generate_shared_key(self, server_public_key):
         # Generate a shared key using the server's public key and our private key
         shared_key = self.private_key.exchange(server_public_key)
+        return shared_key
         
     def derive_keys(self, shared_key):
         # Derive the root key from the shared key using HKDF
         self.derived_key = HKDF(
             algorithm=hashes.SHA256(),
-            length=64,
+            length=80,  # Increase to have enough bytes for all keys
             salt=None,
             info=b'Diffie-Hellman key derivation using HKDF',
             backend=default_backend()
         ).derive(shared_key)
         
         # Use the derived key to create the root key and chain keys
-        self.root_key = self.derived_key[:32]
-        self.chain_key_send = self.derived_key[32:48]
-        self.chain_key_receive = self.derived_key[48:]
+        self.root_key = self.derived_key[:32]  # 32 bytes for root key
+        self.chain_key_send = self.derived_key[32:64]  # 32 bytes for sending chain
+        self.chain_key_receive = self.derived_key[64:]  # 16 bytes for receiving chain
 
     def ratchet_forward(self, is_sending):
         # Derives a new key for sending or receiving messages, driving the ratchet forward
@@ -73,9 +74,13 @@ class DoubleRatchet:
         # Encrypts a message using the current message key and the chain key
         message_key = self.ratchet_forward(is_sending=True)
         
-        # Use the first 32 bytes as the encryption key and the next 16 bytes as the IV
-        encryption_key = message_key[:32]
-        iv = message_key[32:48]
+        # Generate a fixed-length key and IV from the message key
+        # AES requires a 16, 24, or 32 byte key and CBC mode requires a 16 byte IV
+        encryption_key = message_key[:32]  # Use first 32 bytes as the key
+        
+        # Generate a 16-byte IV (using a hash if needed to ensure correct length)
+        iv_material = hmac.new(message_key, b"iv", hashlib.sha256).digest()
+        iv = iv_material[:16]  # Take exactly 16 bytes for the IV
 
         # Create cipher object and encrypt the message
         cipher = Cipher(algorithms.AES(encryption_key), modes.CBC(iv), backend=default_backend())
@@ -93,9 +98,12 @@ class DoubleRatchet:
         # Generate the next message key by driving the ratchet forward
         message_key = self.ratchet_forward(is_sending=False)
 
-        # Use the first 32 bytes as the decryption key and the next 16 bytes as the IV
+        # Generate a fixed-length key and IV from the message key - must match encryption
         decryption_key = message_key[:32]
-        iv = message_key[32:48]
+        
+        # Generate the same 16-byte IV using the same method as in encrypt_message
+        iv_material = hmac.new(message_key, b"iv", hashlib.sha256).digest()
+        iv = iv_material[:16]  # Take exactly 16 bytes for the IV
 
         # Create cipher object and decrypt the message
         cipher = Cipher(algorithms.AES(decryption_key), modes.CBC(iv), backend=default_backend())
@@ -108,18 +116,17 @@ class DoubleRatchet:
         # Unpad the message and return
         return self.unpad(decrypted_message).decode()
     
-    def _pad(self, s):
+    def pad(self, s):
         # Uses PKCS7 padding to pad the message to a multiple of the block size
         padding_length = 16 - (len(s) % 16)
         padding = bytes([padding_length] * padding_length)
         return s + padding
     
-    def _unpad(self, s):
+    def unpad(self, s):
         # Removes PKCS7 padding from the message
         padding_length = s[-1]
         return s[:-padding_length]
         
-
 
 def receive_messages(client_socket,double_ratchet):
     while True:
@@ -127,6 +134,7 @@ def receive_messages(client_socket,double_ratchet):
             # Receive the incoming message from the server
             response = client_socket.recv(1024).decode()
             
+            print(f"\nciphertext message: {response}")
             # Attempt to decrypt the message
             try:
                 decrypted_message = double_ratchet.decrypt_message(response)
@@ -155,13 +163,19 @@ def main():
             # Send the username to the server (No need to encrypt a public username)
             client_socket.sendall(user_name.encode())
 
+            # Wait for the server to acknowledge the username
+            server_ACK = client_socket.recv(1024).decode()
+            if server_ACK != "ALLGOOD":
+                print("Something's wrong with the server....")
+                return
+            
             # Send the public key parameters and public key to the server
             parameters_bytes = double_ratchet.parameters.parameter_numbers()
             public_key_bytes = double_ratchet.public_key.public_numbers().y.to_bytes((2048+7) // 8, byteorder='big')
 
             # Send parameter information to the server
             client_socket.sendall(json.dumps({
-                'p': parameters_bytes.p,
+                'p': str(parameters_bytes.p),
                 'g': parameters_bytes.g,
                 'public_key': public_key_bytes.hex()
             }).encode())
@@ -169,18 +183,13 @@ def main():
             # Recieve remote public key information
             remote_params = json.loads(client_socket.recv(2048).decode())
 
-            # Reconstruct the server's public key
-            remote_params_object = dh.DHParameterNumbers(
-                p=remote_params['p'],
-                g=remote_params['g']
-            ).parameters(default_backend())
-
-            remote_public_key = remote_params_object.load_public_numbers(
-                dh.DHPublicNumbers(
-                    y=int(remote_params['public_key'], 16),
-                    parameter_numbers=remote_params_object.parameter_numbers()
-                )
+            # Reconstruct the server's public key using our own parameters
+            # This ensures parameter compatibility
+            remote_public_numbers = dh.DHPublicNumbers(
+                y=int(remote_params['public_key'], 16),
+                parameter_numbers=double_ratchet.parameters.parameter_numbers()
             )
+            remote_public_key = remote_public_numbers.public_key(default_backend())
 
             # Store the remote public key
             double_ratchet.server_public_key = remote_public_key
@@ -190,9 +199,10 @@ def main():
             double_ratchet.derive_keys(shared_key)
 
             print(f"Connected to chat client {host}:{port}, say hi!")
+            print("Shared key:", shared_key.hex())
             
             # Make a new thread to handle incoming messages
-            message_receiver = threading.Thread(target=receive_messages, args=(client_socket,))
+            message_receiver = threading.Thread(target=receive_messages, args=(client_socket,double_ratchet))
             message_receiver.start()
 
             session = PromptSession(message=f"{user_name}: ")
