@@ -15,11 +15,15 @@ from cryptography.hazmat.backends import default_backend
 from base64 import b64encode, b64decode
 
 class DoubleRatchet:
-    def __init__(self):
-        # Set up the diffie-hellman parameters using the cryptography library
-        self.parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
+    def __init__(self, parameters=None):
+        # If parameters are provided, use them, otherwise generate new parameters
+        if parameters:
+            self.parameters = parameters
+        else:
+            # This will only be used if parameters aren't passed from the server
+            self.parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
         
-        # Generate a private key and private key pair
+        # Generate a private key and public key pair
         self.private_key = self.parameters.generate_private_key()
         self.public_key = self.private_key.public_key()
         
@@ -30,7 +34,7 @@ class DoubleRatchet:
         self.message_number_send = 0
         self.message_number_receive = 0
         
-        # Storest the public key we will get from the server
+        # Stores the public key we will get from the server
         self.server_public_key = None
     
     def generate_shared_key(self, server_public_key):
@@ -128,7 +132,7 @@ class DoubleRatchet:
         return s[:-padding_length]
         
 
-def receive_messages(client_socket,double_ratchet):
+def receive_messages(client_socket, double_ratchet):
     while True:
         try:
             # Receive the incoming message from the server
@@ -149,8 +153,8 @@ def main():
     host = '127.0.0.1'
     port = 12345
 
-    # Initialize the double ratchet protocol
-    double_ratchet = DoubleRatchet()
+    # We'll initialize double_ratchet after receiving parameters from server
+    double_ratchet = None
 
     # Ask the user for a username
     user_name = input("Enter your name: ")
@@ -169,25 +173,37 @@ def main():
                 print("Something's wrong with the server....")
                 return
             
-            # Send the public key parameters and public key to the server
-            parameters_bytes = double_ratchet.parameters.parameter_numbers()
+            # Receive DH parameters from the server
+            params_json = json.loads(client_socket.recv(2048).decode())
+            print(f"Received DH parameters from server")
+            
+            # Acknowledge receipt of parameters
+            client_socket.sendall("PARAMS_RECEIVED".encode())
+            
+            # Create DH parameters from the received values
+            parameter_numbers = dh.DHParameterNumbers(
+                p=int(params_json['p']),
+                g=params_json['g']
+            )
+            parameters = parameter_numbers.parameters(default_backend())
+            
+            # Now initialize the DoubleRatchet with the server-provided parameters
+            double_ratchet = DoubleRatchet(parameters)
+            
+            # Send only the public key to the server
             public_key_bytes = double_ratchet.public_key.public_numbers().y.to_bytes((2048+7) // 8, byteorder='big')
-
-            # Send parameter information to the server
             client_socket.sendall(json.dumps({
-                'p': str(parameters_bytes.p),
-                'g': parameters_bytes.g,
                 'public_key': public_key_bytes.hex()
             }).encode())
 
-            # Recieve remote public key information
+            # Receive remote public key information
             remote_params = json.loads(client_socket.recv(2048).decode())
+            print(f"Received remote public key")
 
-            # Reconstruct the server's public key using our own parameters
-            # This ensures parameter compatibility
+            # Reconstruct the remote public key using our parameters
             remote_public_numbers = dh.DHPublicNumbers(
                 y=int(remote_params['public_key'], 16),
-                parameter_numbers=double_ratchet.parameters.parameter_numbers()
+                parameter_numbers=parameter_numbers
             )
             remote_public_key = remote_public_numbers.public_key(default_backend())
 
@@ -202,7 +218,7 @@ def main():
             print("Shared key:", shared_key.hex())
             
             # Make a new thread to handle incoming messages
-            message_receiver = threading.Thread(target=receive_messages, args=(client_socket,double_ratchet))
+            message_receiver = threading.Thread(target=receive_messages, args=(client_socket, double_ratchet))
             message_receiver.start()
 
             session = PromptSession(message=f"{user_name}: ")
