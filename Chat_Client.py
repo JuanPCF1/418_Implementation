@@ -34,8 +34,14 @@ class DoubleRatchet:
         self.message_number_send = 0
         self.message_number_receive = 0
         
-        # Stores the public key we will get from the server
-        self.server_public_key = None
+        # Stores the remote party's current public key
+        self.remote_public_key = None
+        
+        # Flag to track if we've sent our first message yet
+        self.sent_first_message = False
+        
+        # Flag to determine if we're the initiator (affects key derivation)
+        self.is_initiator = False
     
     def generate_shared_key(self, server_public_key):
         # Generate a shared key using the server's public key and our private key
@@ -82,15 +88,106 @@ class DoubleRatchet:
             self.message_number_receive += 1
             return message_key
         
+    def dh_ratchet_send(self):
+        """
+        Performs the sending part of a DH ratchet:
+        1. Generates a new key pair
+        2. Calculates a new shared secret using the remote public key
+        3. Derives new chain keys from this shared secret
+        """
+        # Generate a new key pair
+        old_private_key = self.private_key
+        self.private_key = self.parameters.generate_private_key()
+        self.public_key = self.private_key.public_key()
+        
+        print(f"DH ratchet (send): Generated new key pair")
+        
+        # Calculate new shared secret
+        if self.remote_public_key:
+            shared_key = self.private_key.exchange(self.remote_public_key)
+            
+            # Use HKDF to derive new root key and chain keys
+            kdf = HKDF(
+                algorithm=hashes.SHA256(),
+                length=80,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
+                salt=self.root_key,  # Use the current root key as salt
+                info=b'DH Ratchet update',
+                backend=default_backend()
+            )
+            derived_key = kdf.derive(shared_key)
+            
+            # Update the root key and chain keys
+            self.root_key = derived_key[:32]
+            
+            # Assign chain keys based on initiator status
+            if self.is_initiator:
+                self.chain_key_send = derived_key[32:64]
+                self.chain_key_receive = derived_key[64:]
+            else:
+                self.chain_key_receive = derived_key[32:64]
+                self.chain_key_send = derived_key[64:]
+                
+            print(f"DH ratchet (send): Updated keys with new shared secret")
+            return True
+        return False
+        
+    def dh_ratchet_receive(self, new_remote_key):
+        """
+        Performs the receiving part of a DH ratchet:
+        1. Uses our current key pair with the new remote public key
+        2. Calculates a new shared secret
+        3. Derives new chain keys from this shared secret
+        """
+        # Store the new remote public key
+        self.remote_public_key = new_remote_key
+        
+        print(f"DH ratchet (receive): Using new remote public key")
+        
+        # Calculate new shared secret using our current private key
+        shared_key = self.private_key.exchange(self.remote_public_key)
+        
+        # Use HKDF to derive new root key and chain keys
+        kdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=80,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
+            salt=self.root_key,  # Use the current root key as salt
+            info=b'DH Ratchet update',
+            backend=default_backend()
+        )
+        derived_key = kdf.derive(shared_key)
+        
+        # Update the root key and chain keys
+        self.root_key = derived_key[:32]
+        
+        # Assign chain keys based on initiator status
+        if self.is_initiator:
+            self.chain_key_send = derived_key[32:64]
+            self.chain_key_receive = derived_key[64:]
+        else:
+            self.chain_key_receive = derived_key[32:64]
+            self.chain_key_send = derived_key[64:]
+            
+        print(f"DH ratchet (receive): Updated keys with new shared secret")
+        return True
+    
     def encrypt_message(self, plaintext):
-        # Encrypts a message using the current message key and the chain key
+        # Before encrypting, perform a DH ratchet if this is not our first message
+        if self.sent_first_message:
+            self.dh_ratchet_send()
+        else:
+            self.sent_first_message = True
+            
+        # Encode the public key to include with the message
+        public_key_bytes = self.public_key.public_numbers().y.to_bytes((2048+7) // 8, byteorder='big')
+        public_key_hex = public_key_bytes.hex()
+        
+        # Encrypt the message using the current message key
         message_key = self.ratchet_forward(is_sending=True)
         
         # Generate a fixed-length key and IV from the message key
-        # AES requires a 16, 24, or 32 byte key and CBC mode requires a 16 byte IV
         encryption_key = message_key[:32]  # Use first 32 bytes as the key
         
-        # Generate a 16-byte IV (using a hash if needed to ensure correct length)
+        # Generate a 16-byte IV
         iv_material = hmac.new(message_key, b"iv", hashlib.sha256).digest()
         iv = iv_material[:16]  # Take exactly 16 bytes for the IV
 
@@ -101,32 +198,80 @@ class DoubleRatchet:
         # Pad the message
         padded_message = self.pad(plaintext.encode())
 
-        # Encrypt the message and decode
+        # Encrypt the message
         ciphertext = encryptor.update(padded_message) + encryptor.finalize()
-        return b64encode(ciphertext).decode()
-    
-    def decrypt_message(self, encoded_ciphertext):
-        # Decrypts a message using the current message key and the chain key
-        # Generate the next message key by driving the ratchet forward
-        message_key = self.ratchet_forward(is_sending=False)
-
-        # Generate a fixed-length key and IV from the message key - must match encryption
-        decryption_key = message_key[:32]
+        encrypted_text = b64encode(ciphertext).decode()
         
-        # Generate the same 16-byte IV using the same method as in encrypt_message
-        iv_material = hmac.new(message_key, b"iv", hashlib.sha256).digest()
-        iv = iv_material[:16]  # Take exactly 16 bytes for the IV
+        # Combine the public key and ciphertext in a JSON structure
+        message_packet = json.dumps({
+            "public_key": public_key_hex,
+            "ciphertext": encrypted_text
+        })
+        
+        return message_packet
+    
+    def decrypt_message(self, received_message):
+        try:
+            # Parse the received message packet
+            message_data = json.loads(received_message)
+            
+            # Extract remote public key and ciphertext
+            remote_public_key_hex = message_data.get("public_key")
+            encoded_ciphertext = message_data.get("ciphertext")
+            
+            if not remote_public_key_hex or not encoded_ciphertext:
+                print("Error: Received message is missing public key or ciphertext")
+                return "Error: Invalid message format"
+                
+            # Reconstruct the remote public key
+            remote_y = int(remote_public_key_hex, 16)
+            remote_public_numbers = dh.DHPublicNumbers(
+                y=remote_y,
+                parameter_numbers=self.parameters.parameter_numbers()
+            )
+            new_remote_public_key = remote_public_numbers.public_key(default_backend())
+            
+            # Check if the remote public key has changed
+            key_changed = False
+            if self.remote_public_key is None or (
+                    self.remote_public_key.public_numbers().y != new_remote_public_key.public_numbers().y):
+                key_changed = True
+                print("Received new remote public key")
+                
+                # Perform a DH ratchet receive step if the key has changed
+                if key_changed and self.root_key is not None:
+                    self.dh_ratchet_receive(new_remote_public_key)
+                else:
+                    # Just store the new key if this is our first message
+                    self.remote_public_key = new_remote_public_key
+            
+            # Generate the next message key by driving the ratchet forward
+            message_key = self.ratchet_forward(is_sending=False)
 
-        # Create cipher object and decrypt the message
-        cipher = Cipher(algorithms.AES(decryption_key), modes.CBC(iv), backend=default_backend())
-        decryptor = cipher.decryptor()
+            # Generate a fixed-length key and IV from the message key
+            decryption_key = message_key[:32]
+            
+            # Generate the same 16-byte IV using the same method
+            iv_material = hmac.new(message_key, b"iv", hashlib.sha256).digest()
+            iv = iv_material[:16]  # Take exactly 16 bytes for the IV
 
-        # Decode and decrypt
-        ciphertext = b64decode(encoded_ciphertext)
-        decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
+            # Create cipher object and decrypt the message
+            cipher = Cipher(algorithms.AES(decryption_key), modes.CBC(iv), backend=default_backend())
+            decryptor = cipher.decryptor()
 
-        # Unpad the message and return
-        return self.unpad(decrypted_message).decode()
+            # Decode and decrypt
+            ciphertext = b64decode(encoded_ciphertext)
+            decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
+
+            # Unpad the message and return
+            return self.unpad(decrypted_message).decode()
+            
+        except json.JSONDecodeError:
+            print("Error: Could not parse message as JSON")
+            return "Error: Invalid message format"
+        except Exception as e:
+            print(f"Error decrypting message: {e}")
+            return f"Error: {str(e)}"
     
     def pad(self, s):
         # Uses PKCS7 padding to pad the message to a multiple of the block size
@@ -161,18 +306,25 @@ def receive_messages(client_socket, double_ratchet):
     while True:
         try:
             # Receive the incoming message from the server
-            response = client_socket.recv(1024).decode()
+            response = client_socket.recv(2048).decode()  # Increased buffer size for JSON+key
             
-            print(f"\nciphertext message: {response}")
+            if not response:
+                continue
+                
+            print(f"\nReceived encrypted message")
             # Attempt to decrypt the message
             try:
                 decrypted_message = double_ratchet.decrypt_message(response)
                 print(decrypted_message)
             except Exception as e:
                 print(f"Failed to decrypt message: {e}")
+                print(f"Error details: {str(e)}")
         except ConnectionResetError:
             print("Connection closed by server")
             break
+        except Exception as e:
+            print(f"Error receiving message: {e}")
+            continue
 
 def main():
     host = '127.0.0.1'
@@ -233,20 +385,19 @@ def main():
             remote_public_key = remote_public_numbers.public_key(default_backend())
 
             # Store the remote public key
-            double_ratchet.server_public_key = remote_public_key
+            double_ratchet.remote_public_key = remote_public_key
 
             # Generate the shared key and derive the keys
             shared_key = double_ratchet.generate_shared_key(remote_public_key)
             
             # Determine if this client is the initiator (first client)
-            # We can decide based on a simple rule: alphabetical ordering of usernames
             is_initiator = False
-            # Get the remote username from the first message once received
-            # For now, we'll determine this by checking if we're the first to connect
-            # This is a heuristic - in a real app you'd use a more robust approach
             if len(remote_params.get('is_initiator', '')) > 0:
                 is_initiator = not bool(int(remote_params['is_initiator']))
                 print(f"This client is {'initiator' if is_initiator else 'responder'}")
+            
+            # Store the initiator status in the double ratchet
+            double_ratchet.is_initiator = is_initiator
                 
             double_ratchet.derive_keys(shared_key, is_initiator)
 
@@ -261,10 +412,13 @@ def main():
             with patch_stdout():
                 while True:
                     message_input = session.prompt()
-                        
-                    # Encrypt the message and send
-                    encrypted_message = double_ratchet.encrypt_message(f"{user_name}: " + message_input)
-                    client_socket.sendall(encrypted_message.encode())
+                    
+                    if not message_input.strip():
+                        continue
+                    
+                    # Encrypt the message and send (now includes public key in JSON)
+                    message_packet = double_ratchet.encrypt_message(f"{user_name}: " + message_input)
+                    client_socket.sendall(message_packet.encode())
                 
         except ConnectionRefusedError:
             print(f"Connection to {host}:{port} failed. Ensure the server is running.")
