@@ -91,8 +91,15 @@ def main():
                 other_client_info = client_public_keys[other_client_name]
 
                 # Send each client the other's public key
-                clients[0].sendall(json.dumps({"public_key": client_key_info["public_key"]}).encode())
-                client_socket.sendall(json.dumps({"public_key": other_client_info["public_key"]}).encode())
+                # Add is_initiator flag to indicate which client is the initiator
+                clients[0].sendall(json.dumps({
+                    "public_key": client_key_info["public_key"],
+                    "is_initiator": "1"  # First client is initiator
+                }).encode())
+                client_socket.sendall(json.dumps({
+                    "public_key": other_client_info["public_key"], 
+                    "is_initiator": "0"  # Second client is responder
+                }).encode())
             
             clients.append(client_socket)
             usernames.append(new_user)

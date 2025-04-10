@@ -42,7 +42,7 @@ class DoubleRatchet:
         shared_key = self.private_key.exchange(server_public_key)
         return shared_key
         
-    def derive_keys(self, shared_key):
+    def derive_keys(self, shared_key, is_initiator=False):
         # Derive the root key from the shared key using HKDF
         self.derived_key = HKDF(
             algorithm=hashes.SHA256(),
@@ -54,8 +54,16 @@ class DoubleRatchet:
         
         # Use the derived key to create the root key and chain keys
         self.root_key = self.derived_key[:32]  # 32 bytes for root key
-        self.chain_key_send = self.derived_key[32:64]  # 32 bytes for sending chain
-        self.chain_key_receive = self.derived_key[64:]  # 16 bytes for receiving chain
+        
+        # The initiator (first client) and responder (second client) use reversed chain keys
+        if is_initiator:
+            # First client uses first part for sending, second part for receiving
+            self.chain_key_send = self.derived_key[32:64]  # 32 bytes for sending chain
+            self.chain_key_receive = self.derived_key[64:]  # 16 bytes for receiving chain
+        else:
+            # Second client uses first part for receiving, second part for sending
+            self.chain_key_receive = self.derived_key[32:64]  # 32 bytes for receiving chain
+            self.chain_key_send = self.derived_key[64:]  # 16 bytes for sending chain
 
     def ratchet_forward(self, is_sending):
         # Derives a new key for sending or receiving messages, driving the ratchet forward
@@ -129,6 +137,23 @@ class DoubleRatchet:
     def unpad(self, s):
         # Removes PKCS7 padding from the message
         padding_length = s[-1]
+        
+        # Validate the padding to ensure it's correct
+        if padding_length > 16:  # Sanity check - padding can't be larger than block size
+            return s  # Return as-is if padding seems invalid
+            
+        # Verify all padding bytes have the correct value
+        valid_padding = True
+        for i in range(1, padding_length + 1):
+            if s[-i] != padding_length:
+                valid_padding = False
+                break
+                
+        if not valid_padding:
+            print("Warning: Invalid padding detected")
+            return s  # Return as-is if padding is invalid
+            
+        # Remove the padding if it's valid
         return s[:-padding_length]
         
 
@@ -212,7 +237,18 @@ def main():
 
             # Generate the shared key and derive the keys
             shared_key = double_ratchet.generate_shared_key(remote_public_key)
-            double_ratchet.derive_keys(shared_key)
+            
+            # Determine if this client is the initiator (first client)
+            # We can decide based on a simple rule: alphabetical ordering of usernames
+            is_initiator = False
+            # Get the remote username from the first message once received
+            # For now, we'll determine this by checking if we're the first to connect
+            # This is a heuristic - in a real app you'd use a more robust approach
+            if len(remote_params.get('is_initiator', '')) > 0:
+                is_initiator = not bool(int(remote_params['is_initiator']))
+                print(f"This client is {'initiator' if is_initiator else 'responder'}")
+                
+            double_ratchet.derive_keys(shared_key, is_initiator)
 
             print(f"Connected to chat client {host}:{port}, say hi!")
             print("Shared key:", shared_key.hex())
