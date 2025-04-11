@@ -52,7 +52,7 @@ class DoubleRatchet:
         # Derive the root key from the shared key using HKDF
         self.derived_key = HKDF(
             algorithm=hashes.SHA256(),
-            length=80,  # Increase to have enough bytes for all keys
+            length=96,  # Increase to have enough bytes for all keys
             salt=None,
             info=b'Diffie-Hellman key derivation using HKDF',
             backend=default_backend()
@@ -96,7 +96,6 @@ class DoubleRatchet:
         3. Derives new chain keys from this shared secret
         """
         # Generate a new key pair
-        old_private_key = self.private_key
         self.private_key = self.parameters.generate_private_key()
         self.public_key = self.private_key.public_key()
         
@@ -109,7 +108,7 @@ class DoubleRatchet:
             # Use HKDF to derive new root key and chain keys
             kdf = HKDF(
                 algorithm=hashes.SHA256(),
-                length=80,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
+                length=96,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
                 salt=self.root_key,  # Use the current root key as salt
                 info=b'DH Ratchet update',
                 backend=default_backend()
@@ -149,7 +148,7 @@ class DoubleRatchet:
         # Use HKDF to derive new root key and chain keys
         kdf = HKDF(
             algorithm=hashes.SHA256(),
-            length=80,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
+            length=96,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
             salt=self.root_key,  # Use the current root key as salt
             info=b'DH Ratchet update',
             backend=default_backend()
