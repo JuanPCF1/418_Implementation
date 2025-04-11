@@ -52,7 +52,7 @@ class DoubleRatchet:
         # Derive the root key from the shared key using HKDF
         self.derived_key = HKDF(
             algorithm=hashes.SHA256(),
-            length=96,
+            length=80,  # Increase to have enough bytes for all keys
             salt=None,
             info=b'Diffie-Hellman key derivation using HKDF',
             backend=default_backend()
@@ -65,11 +65,11 @@ class DoubleRatchet:
         if is_initiator:
             # First client uses first part for sending, second part for receiving
             self.chain_key_send = self.derived_key[32:64]  # 32 bytes for sending chain
-            self.chain_key_receive = self.derived_key[64:]  # 32 bytes for receiving chain
+            self.chain_key_receive = self.derived_key[64:]  # 16 bytes for receiving chain
         else:
             # Second client uses first part for receiving, second part for sending
             self.chain_key_receive = self.derived_key[32:64]  # 32 bytes for receiving chain
-            self.chain_key_send = self.derived_key[64:]  # 32 bytes for sending chain
+            self.chain_key_send = self.derived_key[64:]  # 16 bytes for sending chain
 
     def ratchet_forward(self, is_sending):
         # Derives a new key for sending or receiving messages, driving the ratchet forward
@@ -109,7 +109,7 @@ class DoubleRatchet:
             # Use HKDF to derive new root key and chain keys
             kdf = HKDF(
                 algorithm=hashes.SHA256(),
-                length=96,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
+                length=80,  # 32 bytes for root key + 32 for send chain + 16 for receive chain
                 salt=self.root_key,  # Use the current root key as salt
                 info=b'DH Ratchet update',
                 backend=default_backend()
