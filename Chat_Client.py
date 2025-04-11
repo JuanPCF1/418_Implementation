@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import socket
+import sys
 import threading
 import os
 import json
@@ -98,9 +99,7 @@ class DoubleRatchet:
         # Generate a new key pair
         self.private_key = self.parameters.generate_private_key()
         self.public_key = self.private_key.public_key()
-        
-        print(f"DH ratchet (send): Generated new key pair")
-        
+                
         # Calculate new shared secret
         if self.remote_public_key:
             shared_key = self.private_key.exchange(self.remote_public_key)
@@ -126,22 +125,13 @@ class DoubleRatchet:
                 self.chain_key_receive = derived_key[32:64]
                 self.chain_key_send = derived_key[64:]
                 
-            print(f"DH ratchet (send): Updated keys with new shared secret")
             return True
         return False
         
     def dh_ratchet_receive(self, new_remote_key):
-        """
-        Performs the receiving part of a DH ratchet:
-        1. Uses our current key pair with the new remote public key
-        2. Calculates a new shared secret
-        3. Derives new chain keys from this shared secret
-        """
         # Store the new remote public key
         self.remote_public_key = new_remote_key
-        
-        print(f"DH ratchet (receive): Using new remote public key")
-        
+                
         # Calculate new shared secret using our current private key
         shared_key = self.private_key.exchange(self.remote_public_key)
         
@@ -166,7 +156,6 @@ class DoubleRatchet:
             self.chain_key_receive = derived_key[32:64]
             self.chain_key_send = derived_key[64:]
             
-        print(f"DH ratchet (receive): Updated keys with new shared secret")
         return True
     
     def encrypt_message(self, plaintext):
@@ -235,7 +224,6 @@ class DoubleRatchet:
             if self.remote_public_key is None or (
                     self.remote_public_key.public_numbers().y != new_remote_public_key.public_numbers().y):
                 key_changed = True
-                print("Received new remote public key")
                 
                 # Perform a DH ratchet receive step if the key has changed
                 if key_changed and self.root_key is not None:
@@ -310,7 +298,6 @@ def receive_messages(client_socket, double_ratchet):
             if not response:
                 continue
                 
-            print(f"\nReceived encrypted message")
             # Attempt to decrypt the message
             try:
                 decrypted_message = double_ratchet.decrypt_message(response)
@@ -351,7 +338,7 @@ def main():
             
             # Receive DH parameters from the server
             params_json = json.loads(client_socket.recv(2048).decode())
-            print(f"Received DH parameters from server")
+            print(f"Waiting for other user to connect...")
             
             # Acknowledge receipt of parameters
             client_socket.sendall("PARAMS_RECEIVED".encode())
@@ -374,7 +361,6 @@ def main():
 
             # Receive remote public key information
             remote_params = json.loads(client_socket.recv(2048).decode())
-            print(f"Received remote public key")
 
             # Reconstruct the remote public key using our parameters
             remote_public_numbers = dh.DHPublicNumbers(
@@ -393,18 +379,17 @@ def main():
             is_initiator = False
             if len(remote_params.get('is_initiator', '')) > 0:
                 is_initiator = not bool(int(remote_params['is_initiator']))
-                print(f"This client is {'initiator' if is_initiator else 'responder'}")
             
             # Store the initiator status in the double ratchet
             double_ratchet.is_initiator = is_initiator
                 
             double_ratchet.derive_keys(shared_key, is_initiator)
 
-            print(f"Connected to chat client {host}:{port}, say hi!")
-            print("Shared key:", shared_key.hex())
+            print(f"Connected to chat client {host}:{port}, say hi!\n You can exit the chat by typing @exit")
             
             # Make a new thread to handle incoming messages
             message_receiver = threading.Thread(target=receive_messages, args=(client_socket, double_ratchet))
+            message_receiver.daemon = True  # Daemonize thread to exit when main thread exits
             message_receiver.start()
 
             session = PromptSession(message=f"{user_name}: ")
@@ -412,9 +397,16 @@ def main():
                 while True:
                     message_input = session.prompt()
                     
+
                     if not message_input.strip():
                         continue
-                    
+
+                    # Give the user a chance to exit the chat
+                    if message_input == "@exit":
+                        print("Exiting chat...")
+                        message_receiver
+                        sys.exit(0)
+
                     # Encrypt the message and send (now includes public key in JSON)
                     message_packet = double_ratchet.encrypt_message(f"{user_name}: " + message_input)
                     client_socket.sendall(message_packet.encode())

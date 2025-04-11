@@ -24,9 +24,7 @@ def handle_client(client_socket, clients, username, usernames):
                     client.sendall(encrypted_message.encode())
     except ConnectionResetError:
         log_message(f"{username} disconnected")
-        for client in clients:
-            if client != client_socket:
-                client.sendall(f"{username} disconnected".encode())
+        print(f"{username} disconnected")
         clients.remove(client_socket)
         client_socket.close()
 
@@ -47,7 +45,7 @@ def main():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.bind((host, port))
         server_socket.listen(5)  # Listen for incoming connections
-        print(f"Chat server is running on {host}:{port}...")
+        print(f"Chat server is running on {host}:{port}...\nMake sure you connect two clients only. If you want to test again, remember to restart the server.")
         log_message(f"Chat server is running on {host}:{port}...")
         log_message("Server log:")
         clients = []
