@@ -18,3 +18,11 @@ Known Limitations:
 - Support only for UTF-8 text messages
 - No authentication support
 
+Potential Issues:
+- If it says you do not have the cryptography library please run the following commands:
+On windows:
+pip install cryptography
+
+On Linux:
+sudo apt install cyrptography
+
